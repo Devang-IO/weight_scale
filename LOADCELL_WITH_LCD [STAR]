@@ -1,0 +1,99 @@
+// Fast-response ESP32 + HX711_ADC + I2C LCD
+// Keep HX711 module default pins as you use: DOUT=23, SCK=22
+// I2C pins: SDA=18, SCL=19 (change if needed)
+
+// Libraries: HX711_ADC (olkal) and LiquidCrystal_I2C
+#include <HX711_ADC.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+
+const int HX711_DOUT = 23;
+const int HX711_SCK  = 22;
+const int I2C_SDA = 18;
+const int I2C_SCL = 19;
+const int TARE_BTN = 25;
+
+HX711_ADC LoadCell(HX711_DOUT, HX711_SCK);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+float calFactor = 11026.3; // <-- put your calibration factor here
+unsigned long lastLcdMs = 0;
+const unsigned long LCD_UPDATE_MS = 100; // update LCD every 100 ms (make smaller for more frequent updates)
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(TARE_BTN, INPUT_PULLUP);
+  Wire.begin(I2C_SDA, I2C_SCL);
+
+  lcd.init();
+  lcd.backlight();
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Starting...");
+
+  // HX711 init
+  LoadCell.begin();
+  LoadCell.start(200);           // short stabilization on start (ms)
+  LoadCell.setCalFactor(calFactor);
+  // NOTE: Do not call a long start() delay frequently — only when starting or taring
+
+  lcd.clear();
+  lcd.setCursor(0,0);
+  lcd.print("Digital Scale");
+  delay(600);
+  lcd.clear();
+}
+
+void loop() {
+  // Keep updating the HX711 as fast as possible
+  LoadCell.update();            // pull new sample if available
+
+  // get raw data (uses internal calFactor) -- getData is quick
+  float grams = LoadCell.getData();
+
+  // If you want the most immediate raw reaction, do NOT do extra averaging here.
+  // But we can do a tiny exponential smoothing for a stable feel if you like:
+  // static float disp = 0;
+  // const float alpha = 0.25; // larger alpha = more responsive (0..1)
+  // disp = disp * (1 - alpha) + grams * alpha;
+  // use disp for display instead of grams if you prefer slight smoothing.
+
+  // Tare button handling: only when pressed, call start() to re-stabilize
+  if (digitalRead(TARE_BTN) == LOW) {
+    lcd.setCursor(0,1); lcd.print("Taring...        ");
+    LoadCell.start(200);   // short restart to stabilize after tare
+    delay(300);            // small debounce
+    lcd.setCursor(0,1); lcd.print("                ");
+  }
+
+  // Update Serial always (you can reduce this frequency if too spammy)
+  Serial.print("g: ");
+  Serial.println(grams, 2);
+
+  // Update LCD at a controlled refresh rate to avoid flicker
+  unsigned long now = millis();
+  if (now - lastLcdMs >= LCD_UPDATE_MS) {
+    lastLcdMs = now;
+
+    // Prepare a clean display line
+    lcd.setCursor(0,0);
+    lcd.print("Digital Scale    "); // clear right side
+
+    // Show grams with 1 decimal (adjust formatting to keep columns stable)
+    char buf[17];
+    snprintf(buf, sizeof(buf), "%6.1f g", grams);
+    lcd.setCursor(0,1);
+    lcd.print(buf);
+
+    // show ounces on same line right side
+    float oz = grams / 28.3495;
+    char ozbuf[9];
+    snprintf(ozbuf, sizeof(ozbuf), "%6.2foz", oz);
+    lcd.setCursor(9,1);
+    lcd.print(ozbuf);
+  }
+
+  // tiny delay to give CPU a break; HX711 will sample at its own rate
+  // set to 0 or a few ms for maximum responsiveness
+  delay(5);
+}
