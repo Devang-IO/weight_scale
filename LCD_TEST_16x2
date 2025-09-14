@@ -15,3 +15,15 @@ void setup(){
   lcd.print("Adjust contrast");
 }
 void loop(){}
+
+/*
+Wiring (typical for ESP32 modules):
+
+LCD I2C GND → ESP32 GND
+
+LCD I2C VCC → ESP32 3V3 (some modules also work with 5V)
+
+LCD I2C SDA → ESP32 GPIO21
+
+LCD I2C SCL → ESP32 GPIO22
+*/
