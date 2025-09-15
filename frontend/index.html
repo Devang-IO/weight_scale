@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plant Weight Monitor</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .config-section {
+            background: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .config-section h3 {
+            margin-top: 0;
+            color: #555;
+        }
+        .config-input {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        .refresh-btn, .save-btn {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin: 5px 5px 20px 0;
+        }
+        .refresh-btn:hover, .save-btn:hover {
+            background: #45a049;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 12px;
+            text-align: center;
+        }
+        th {
+            background-color: #4CAF50;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: #666;
+        }
+        .error {
+            color: #d32f2f;
+            text-align: center;
+            padding: 20px;
+        }
+        .success {
+            color: #4CAF50;
+            text-align: center;
+            padding: 10px;
+        }
+        .timestamp {
+            font-size: 0.9em;
+            color: #666;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌱 Plant Weight Monitor</h1>
+        
+        <!-- Configuration Section -->
+        <div class="config-section">
+            <h3>Supabase Configuration</h3>
+            <input type="text" id="supabaseUrl" class="config-input" placeholder="Enter your Supabase URL" />
+            <input type="text" id="supabaseKey" class="config-input" placeholder="Enter your Supabase anon key" />
+            <button class="save-btn" onclick="saveConfig()">Save Config</button>
+            <div id="configStatus"></div>
+        </div>
+        
+        <button class="refresh-btn" onclick="loadData()">Refresh Data</button>
+        <div id="content">
+            <div class="loading">Configure Supabase credentials above, then click Refresh Data</div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration management
+        function saveConfig() {
+            const url = document.getElementById('supabaseUrl').value.trim();
+            const key = document.getElementById('supabaseKey').value.trim();
+            
+            if (!url || !key) {
+                document.getElementById('configStatus').innerHTML = '<div class="error">Please enter both URL and API key</div>';
+                return;
+            }
+            
+            localStorage.setItem('supabaseUrl', url);
+            localStorage.setItem('supabaseKey', key);
+            document.getElementById('configStatus').innerHTML = '<div class="success">Configuration saved!</div>';
+            
+            setTimeout(() => {
+                document.getElementById('configStatus').innerHTML = '';
+            }, 3000);
+        }
+        
+        function loadConfig() {
+            const url = localStorage.getItem('supabaseUrl') || '';
+            const key = localStorage.getItem('supabaseKey') || '';
+            
+            document.getElementById('supabaseUrl').value = url;
+            document.getElementById('supabaseKey').value = key;
+            
+            return { url, key };
+        }
+        
+        // Supabase client simulation (without external dependencies)
+        async function supabaseQuery(table, options = {}) {
+            const config = loadConfig();
+            
+            if (!config.url || !config.key) {
+                throw new Error('Please configure Supabase credentials first');
+            }
+            
+            const url = `${config.url}/rest/v1/${table}${options.select ? `?select=${options.select}` : ''}${options.order ? `&order=${options.order}` : ''}`;
+            
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'apikey': config.key,
+                    'Authorization': `Bearer ${config.key}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+            
+            return await response.json();
+        }
+        
+        // Load and display data
+        async function loadData() {
+            const contentDiv = document.getElementById('content');
+            contentDiv.innerHTML = '<div class="loading">Loading data...</div>';
+
+            try {
+                const data = await supabaseQuery('weights', {
+                    select: '*',
+                    order: 'created_at.desc'
+                });
+
+                if (!data || data.length === 0) {
+                    contentDiv.innerHTML = '<div class="loading">No data available yet.</div>';
+                    return;
+                }
+
+                // Create table
+                let tableHTML = `
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Plant 0</th>
+                                <th>Plant 1</th>
+                                <th>Plant 2</th>
+                                <th>Plant 3</th>
+                                <th>Plant 4</th>
+                                <th>Plant 5</th>
+                                <th>Plant 6</th>
+                                <th>Plant 7</th>
+                                <th>Plant 8</th>
+                                <th>Plant 9</th>
+                                <th>Created At</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+
+                data.forEach(row => {
+                    const formatWeight = (weight) => weight ? `${weight}g` : '-';
+                    const formatDate = (dateStr) => new Date(dateStr).toLocaleString();
+
+                    tableHTML += `
+                        <tr>
+                            <td>${row.id}</td>
+                            <td>${formatWeight(row.plant_0)}</td>
+                            <td>${formatWeight(row.plant_1)}</td>
+                            <td>${formatWeight(row.plant_2)}</td>
+                            <td>${formatWeight(row.plant_3)}</td>
+                            <td>${formatWeight(row.plant_4)}</td>
+                            <td>${formatWeight(row.plant_5)}</td>
+                            <td>${formatWeight(row.plant_6)}</td>
+                            <td>${formatWeight(row.plant_7)}</td>
+                            <td>${formatWeight(row.plant_8)}</td>
+                            <td>${formatWeight(row.plant_9)}</td>
+                            <td class="timestamp">${formatDate(row.created_at)}</td>
+                        </tr>
+                    `;
+                });
+
+                tableHTML += `
+                        </tbody>
+                    </table>
+                `;
+
+                contentDiv.innerHTML = tableHTML;
+
+            } catch (error) {
+                console.error('Error loading data:', error);
+                contentDiv.innerHTML = `<div class="error">Error loading data: ${error.message}</div>`;
+            }
+        }
+
+        // Load configuration when page loads
+        document.addEventListener('DOMContentLoaded', loadConfig);
+    </script>
+</body>
+</html>
