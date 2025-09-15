@@ -8,6 +8,8 @@
  * - Automatic averaging of weight readings
  */
 
+ //current response time - 1.27 - 2.08 seconds
+
 #include <HX711_ADC.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
