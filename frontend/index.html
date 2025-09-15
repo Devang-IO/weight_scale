@@ -1,154 +1,152 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plant Weight Monitor</title>
+    <title>Weights Monitoring</title>
     <style>
         body {
             font-family: Arial, sans-serif;
             margin: 20px;
             background-color: #f5f5f5;
         }
+
         .container {
             max-width: 1200px;
             margin: 0 auto;
             background: white;
             padding: 20px;
             border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
         }
+
         h1 {
             color: #333;
             text-align: center;
             margin-bottom: 30px;
         }
-        .config-section {
-            background: #f9f9f9;
-            padding: 15px;
-            border-radius: 5px;
-            margin-bottom: 20px;
-        }
-        .config-section h3 {
-            margin-top: 0;
-            color: #555;
-        }
-        .config-input {
-            width: 100%;
-            padding: 8px;
-            margin: 5px 0;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-        }
-        .refresh-btn, .save-btn {
+
+        .refresh-btn {
             background: #4CAF50;
             color: white;
             border: none;
             padding: 10px 20px;
             border-radius: 4px;
             cursor: pointer;
-            margin: 5px 5px 20px 0;
         }
-        .refresh-btn:hover, .save-btn:hover {
+
+        .refresh-btn:hover {
             background: #45a049;
         }
+
         table {
             width: 100%;
             border-collapse: collapse;
             margin-top: 20px;
         }
-        th, td {
+
+        th,
+        td {
             border: 1px solid #ddd;
             padding: 12px;
             text-align: center;
         }
+
         th {
             background-color: #4CAF50;
             color: white;
         }
+
         tr:nth-child(even) {
             background-color: #f2f2f2;
         }
+
         .loading {
             text-align: center;
             padding: 20px;
             color: #666;
         }
+
         .error {
             color: #d32f2f;
             text-align: center;
             padding: 20px;
         }
-        .success {
-            color: #4CAF50;
-            text-align: center;
-            padding: 10px;
-        }
+
         .timestamp {
             font-size: 0.9em;
             color: #666;
         }
     </style>
 </head>
+
 <body>
     <div class="container">
-        <h1>🌱 Plant Weight Monitor</h1>
-        
-        <!-- Configuration Section -->
-        <div class="config-section">
-            <h3>Supabase Configuration</h3>
-            <input type="text" id="supabaseUrl" class="config-input" placeholder="Enter your Supabase URL" />
-            <input type="text" id="supabaseKey" class="config-input" placeholder="Enter your Supabase anon key" />
-            <button class="save-btn" onclick="saveConfig()">Save Config</button>
-            <div id="configStatus"></div>
+        <h1>Weights Monitoring</h1>
+
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+            <button class="refresh-btn" onclick="loadData()">Refresh Data</button>
+            <div style="display: flex; align-items: center; gap: 15px;">
+                <label>
+                    <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()" checked>
+                    Auto-refresh (30s)
+                </label>
+                <span id="lastUpdated" class="timestamp"></span>
+            </div>
         </div>
-        
-        <button class="refresh-btn" onclick="loadData()">Refresh Data</button>
         <div id="content">
-            <div class="loading">Configure Supabase credentials above, then click Refresh Data</div>
+            <div class="loading">Loading data...</div>
         </div>
     </div>
 
     <script>
-        // Configuration management
-        function saveConfig() {
-            const url = document.getElementById('supabaseUrl').value.trim();
-            const key = document.getElementById('supabaseKey').value.trim();
-            
-            if (!url || !key) {
-                document.getElementById('configStatus').innerHTML = '<div class="error">Please enter both URL and API key</div>';
-                return;
+        let autoRefreshInterval;
+
+        // Hardcoded Supabase configuration
+        const config = {
+            url: 'https://zoblfvpwqodiuudwitwt.supabase.co',
+            key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0.AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g'
+        };
+
+        // Auto-refresh functionality
+        function toggleAutoRefresh() {
+            const checkbox = document.getElementById('autoRefresh');
+
+            if (checkbox.checked) {
+                startAutoRefresh();
+            } else {
+                stopAutoRefresh();
             }
-            
-            localStorage.setItem('supabaseUrl', url);
-            localStorage.setItem('supabaseKey', key);
-            document.getElementById('configStatus').innerHTML = '<div class="success">Configuration saved!</div>';
-            
-            setTimeout(() => {
-                document.getElementById('configStatus').innerHTML = '';
-            }, 3000);
         }
-        
-        function loadConfig() {
-            const url = localStorage.getItem('supabaseUrl') || '';
-            const key = localStorage.getItem('supabaseKey') || '';
-            
-            document.getElementById('supabaseUrl').value = url;
-            document.getElementById('supabaseKey').value = key;
-            
-            return { url, key };
+
+        function startAutoRefresh() {
+            stopAutoRefresh(); // Clear any existing interval
+            autoRefreshInterval = setInterval(() => {
+                loadData();
+            }, 30000); // 30 seconds
         }
-        
+
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+        }
+
+        function updateLastUpdatedTime() {
+            const now = new Date();
+            document.getElementById('lastUpdated').textContent = `Last updated: ${now.toLocaleTimeString()}`;
+        }
+
         // Supabase client simulation (without external dependencies)
         async function supabaseQuery(table, options = {}) {
-            const config = loadConfig();
-            
             if (!config.url || !config.key) {
-                throw new Error('Please configure Supabase credentials first');
+                throw new Error('Supabase credentials not configured');
             }
-            
+
             const url = `${config.url}/rest/v1/${table}${options.select ? `?select=${options.select}` : ''}${options.order ? `&order=${options.order}` : ''}`;
-            
+
             const response = await fetch(url, {
                 method: 'GET',
                 headers: {
@@ -157,14 +155,14 @@
                     'Content-Type': 'application/json'
                 }
             });
-            
+
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
-            
+
             return await response.json();
         }
-        
+
         // Load and display data
         async function loadData() {
             const contentDiv = document.getElementById('content');
@@ -231,6 +229,7 @@
                 `;
 
                 contentDiv.innerHTML = tableHTML;
+                updateLastUpdatedTime();
 
             } catch (error) {
                 console.error('Error loading data:', error);
@@ -238,8 +237,12 @@
             }
         }
 
-        // Load configuration when page loads
-        document.addEventListener('DOMContentLoaded', loadConfig);
+        // Initialize when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            loadData();
+            startAutoRefresh(); // Start auto-refresh by default
+        });
     </script>
 </body>
+
 </html>
