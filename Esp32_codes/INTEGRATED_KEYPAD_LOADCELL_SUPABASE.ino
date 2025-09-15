@@ -33,8 +33,7 @@ const int HX711_SCK  = 22;
 const int I2C_SDA = 18;
 const int I2C_SCL = 19;
 
-// Tare button
-const int TARE_BTN = 25;
+
 
 // Keypad (3x4)
 const byte ROWS = 4;
@@ -91,10 +90,7 @@ void loop() {
     handleKeyPress(key, weight);
   }
   
-  // Handle tare button
-  if (digitalRead(TARE_BTN) == LOW) {
-    performTare();
-  }
+
   
   // Keep screen blank unless showing result
   
@@ -102,9 +98,6 @@ void loop() {
 }
 
 void initializeHardware() {
-  // Tare button
-  pinMode(TARE_BTN, INPUT_PULLUP);
-  
   // I2C LCD
   Wire.begin(I2C_SDA, I2C_SCL);
   lcd.init();
@@ -159,9 +152,6 @@ void handleKeyPress(char key, float weight) {
       int plantNumber = (key == '0') ? 0 : (key - '0');
       processWeightInstantly(plantNumber, weight);
     }
-  } else if (key == '#') {
-    // Tare function
-    performTare();
   }
 }
 
@@ -241,7 +231,3 @@ bool sendToSupabase(int plantNumber, float weight) {
   }
 }
 
-void performTare() {
-  LoadCell.start(1000);
-  Serial.println("Tare completed");
-}
