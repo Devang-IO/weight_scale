@@ -81,18 +81,33 @@ void loop() {
   LoadCell.update();
   float weight = LoadCell.getData();
   
+  // Debug output every 2 seconds
+  static unsigned long lastDebug = 0;
+  if (millis() - lastDebug > 2000) {
+    Serial.print("Weight: ");
+    Serial.print(weight);
+    Serial.print("g, Item present: ");
+    Serial.println((abs(weight) >= MIN_WEIGHT_THRESHOLD) ? "YES" : "NO");
+    lastDebug = millis();
+  }
+  
   // Check item presence
   itemPresent = (abs(weight) >= MIN_WEIGHT_THRESHOLD);
+  
+  // Display weight on LCD
+  displayWeight(weight);
   
   // Handle keypad input
   char key = keypad.getKey();
   if (key) {
+    Serial.print("Key pressed: ");
+    Serial.print(key);
+    Serial.print(", Weight: ");
+    Serial.print(weight);
+    Serial.print("g, Item present: ");
+    Serial.println(itemPresent ? "YES" : "NO");
     handleKeyPress(key, weight);
   }
-  
-
-  
-  // Keep screen blank unless showing result
   
   delay(50); // Faster loop
 }
@@ -131,17 +146,8 @@ void connectToWiFi() {
     Serial.println("\nWiFi connected!");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
-    
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi Connected");
-    delay(1000);
   } else {
     Serial.println("\nWiFi connection failed!");
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("WiFi Failed");
-    delay(2000);
   }
 }
 
@@ -228,6 +234,31 @@ bool sendToSupabase(int plantNumber, float weight) {
     Serial.println(httpResponseCode);
     http.end();
     return false;
+  }
+}
+
+void displayWeight(float weight) {
+  static String lastDisplay = "";
+  String currentDisplay = "";
+  
+  if (abs(weight) >= MIN_WEIGHT_THRESHOLD) {
+    int wholeGrams = (int)round(abs(weight));
+    currentDisplay = String(wholeGrams) + "g";
+    
+    if (wholeGrams >= 5000) {
+      currentDisplay = "OVERLOAD";
+    }
+  }
+  
+  if (currentDisplay != lastDisplay) {
+    lcd.clear();
+    if (currentDisplay.length() > 0) {
+      lcd.setCursor(0, 0);
+      lcd.print(currentDisplay);
+      lcd.setCursor(0, 1);
+      lcd.print("Press key 0-9");
+    }
+    lastDisplay = currentDisplay;
   }
 }
 
