@@ -78,6 +78,19 @@
             font-size: 0.9em;
             color: #666;
         }
+
+        /* WiFi disconnected banner */
+        .wifi-banner {
+            display: none;
+            background: #ffebee;
+            color: #c62828;
+            border: 1px solid #ef9a9a;
+            padding: 10px 14px;
+            border-radius: 6px;
+            margin-bottom: 12px;
+            font-weight: 600;
+            text-align: center;
+        }
     </style>
 </head>
 
@@ -85,13 +98,11 @@
     <div class="container">
         <h1>Weights Monitoring</h1>
 
+        <div id="wifiStatus" class="wifi-banner">WiFi disconnected — showing last loaded data</div>
+
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <button class="refresh-btn" onclick="loadData()">Refresh Data</button>
-            <div style="display: flex; align-items: center; gap: 15px;">
-                <label>
-                    <input type="checkbox" id="autoRefresh" onchange="toggleAutoRefresh()" checked>
-                    Auto-refresh (30s)
-                </label>
+            <button class="refresh-btn" onclick="loadData()">Refresh Now</button>
+            <div>
                 <span id="lastUpdated" class="timestamp"></span>
             </div>
         </div>
@@ -100,72 +111,33 @@
         </div>
     </div>
 
+    <script src="https://unpkg.com/@supabase/supabase-js@2.45.3/dist/umd/supabase.js"></script>
     <script>
-        let autoRefreshInterval;
-
-        // Hardcoded Supabase configuration
+        // Supabase configuration (same as before)
         const config = {
             url: 'https://zoblfvpwqodiuudwitwt.supabase.co',
             key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0.AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g'
         };
-
-        // Auto-refresh functionality
-        function toggleAutoRefresh() {
-            const checkbox = document.getElementById('autoRefresh');
-
-            if (checkbox.checked) {
-                startAutoRefresh();
-            } else {
-                stopAutoRefresh();
-            }
-        }
-
-        function startAutoRefresh() {
-            stopAutoRefresh(); // Clear any existing interval
-            autoRefreshInterval = setInterval(() => {
-                loadData();
-            }, 30000); // 30 seconds
-        }
-
-        function stopAutoRefresh() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-                autoRefreshInterval = null;
-            }
-        }
+        const supa = supabase.createClient(config.url, config.key);
 
         function updateLastUpdatedTime() {
             const now = new Date();
             document.getElementById('lastUpdated').textContent = `Last updated: ${now.toLocaleTimeString()}`;
         }
 
-        // Supabase client simulation (without external dependencies)
         async function supabaseQuery(table, options = {}) {
-            if (!config.url || !config.key) {
-                throw new Error('Supabase credentials not configured');
-            }
-
-            const url = `${config.url}/rest/v1/${table}${options.select ? `?select=${options.select}` : ''}${options.order ? `&order=${options.order}` : ''}`;
-
-            const response = await fetch(url, {
-                method: 'GET',
-                headers: {
-                    'apikey': config.key,
-                    'Authorization': `Bearer ${config.key}`,
-                    'Content-Type': 'application/json'
-                }
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-
-            return await response.json();
+            const { data, error } = await supa
+                .from(table)
+                .select(options.select || '*')
+                .order('created_at', { ascending: false });
+            if (error) throw error;
+            return data;
         }
 
         // Load and display data
         async function loadData() {
             const contentDiv = document.getElementById('content');
+            const wifiBanner = document.getElementById('wifiStatus');
             contentDiv.innerHTML = '<div class="loading">Loading data...</div>';
 
             try {
@@ -230,17 +202,98 @@
 
                 contentDiv.innerHTML = tableHTML;
                 updateLastUpdatedTime();
+                // Hide WiFi-disconnected banner on success
+                if (wifiBanner) wifiBanner.style.display = 'none';
 
             } catch (error) {
                 console.error('Error loading data:', error);
                 contentDiv.innerHTML = `<div class="error">Error loading data: ${error.message}</div>`;
+                // Show WiFi-disconnected banner on error
+                if (wifiBanner) wifiBanner.style.display = 'block';
             }
         }
+
+        // Realtime: listen for inserts on weights and refresh just the top of the table
+        function startRealtime() {
+            try {
+                const channel = supa
+                    .channel('weights-changes')
+                    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'weights' }, payload => {
+                        // Prepend the new row to the table without full reload
+                        prependRow(payload.new);
+                        updateLastUpdatedTime();
+                        const wifiBanner = document.getElementById('wifiStatus');
+                        if (wifiBanner) wifiBanner.style.display = 'none';
+                    })
+                    .subscribe((status) => {
+                        // If channel errors or closes, show banner
+                        if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
+                            const wifiBanner = document.getElementById('wifiStatus');
+                            if (wifiBanner) wifiBanner.style.display = 'block';
+                        }
+                    });
+
+                // Track realtime connection state globally
+                supa.realtime.onConnectionStateChange((s) => {
+                    const wifiBanner = document.getElementById('wifiStatus');
+                    if (!wifiBanner) return;
+                    if (s === 'connected') {
+                        wifiBanner.style.display = 'none';
+                    } else if (s === 'disconnected' || s === 'closed' || s === 'connecting') {
+                        wifiBanner.style.display = 'block';
+                    }
+                });
+            } catch (e) {
+                console.warn('Realtime init failed:', e);
+            }
+        }
+
+        function prependRow(row) {
+            const contentDiv = document.getElementById('content');
+            const existingTable = contentDiv.querySelector('table tbody');
+            if (!existingTable) {
+                // If table not built yet, do full load
+                loadData();
+                return;
+            }
+            const formatWeight = (w) => w ? `${w}g` : '-';
+            const formatDate = (d) => new Date(d).toLocaleString();
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td>${row.id}</td>
+                <td>${formatWeight(row.plant_0)}</td>
+                <td>${formatWeight(row.plant_1)}</td>
+                <td>${formatWeight(row.plant_2)}</td>
+                <td>${formatWeight(row.plant_3)}</td>
+                <td>${formatWeight(row.plant_4)}</td>
+                <td>${formatWeight(row.plant_5)}</td>
+                <td>${formatWeight(row.plant_6)}</td>
+                <td>${formatWeight(row.plant_7)}</td>
+                <td>${formatWeight(row.plant_8)}</td>
+                <td>${formatWeight(row.plant_9)}</td>
+                <td class="timestamp">${formatDate(row.created_at)}</td>
+            `;
+            existingTable.insertBefore(tr, existingTable.firstChild);
+        }
+
+        // Network awareness
+        window.addEventListener('online', () => {
+            const wifiBanner = document.getElementById('wifiStatus');
+            if (wifiBanner) wifiBanner.style.display = 'none';
+        });
+        window.addEventListener('offline', () => {
+            const wifiBanner = document.getElementById('wifiStatus');
+            if (wifiBanner) wifiBanner.style.display = 'block';
+        });
 
         // Initialize when page loads
         document.addEventListener('DOMContentLoaded', () => {
             loadData();
-            startAutoRefresh(); // Start auto-refresh by default
+            startRealtime();
+            if (!navigator.onLine) {
+                const wifiBanner = document.getElementById('wifiStatus');
+                if (wifiBanner) wifiBanner.style.display = 'block';
+            }
         });
     </script>
 </body>
