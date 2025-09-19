@@ -142,26 +142,24 @@
 
     // Handle WiFi reconnection and periodic flush
     static unsigned long lastWiFiCheck = 0;
-    if (millis() - lastWiFiCheck > 5000) {
-        lastWiFiCheck = millis();
-        if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWiFiCheck > 1000) {
+      lastWiFiCheck = millis();
+      if (WiFi.status() != WL_CONNECTED) {
         // Try reconnect
         WiFi.disconnect();
         WiFi.begin(ssid, password);
-        } else {
-        // If connected and offline data exists, enter flushing mode only when idle and API reachable
-        if (hasOfflineData() && state == WAIT_FOR_PLANT_SELECTION && isApiReachable()) {
-            lcd.clear();
-            lcd.setCursor(0, 0);
-            flushTotal = countOfflineLines();
-            flushSent = 0;
-            lcd.print("Sending 0/"); lcd.print(flushTotal);
-            lcd.setCursor(0, 1);
-            lcd.print("[                ]");
-            state = FLUSHING_OFFLINE;
-            stateTs = millis();
+      } else {
+        // If connected and offline data exists, enter flushing mode immediately when idle
+        if (hasOfflineData() && state == WAIT_FOR_PLANT_SELECTION) {
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Checking internet");
+          lcd.setCursor(0, 1);
+          lcd.print(" ");
+          state = FLUSHING_OFFLINE;
+          stateTs = millis();
         }
-        }
+      }
     }
 
     char key = keypad.getKey();
@@ -272,53 +270,69 @@
         break;
 
         case FLUSHING_OFFLINE: {
-          // Abort flushing if WiFi/API not reachable anymore
-          if (WiFi.status() != WL_CONNECTED || !isApiReachable()) {
-            showPressPlant();
-            state = WAIT_FOR_PLANT_SELECTION;
-            stateTs = millis();
-            break;
-          }
+      // Abort only if WiFi drops
+      if (WiFi.status() != WL_CONNECTED) {
+        showPressPlant();
+        state = WAIT_FOR_PLANT_SELECTION;
+        stateTs = millis();
+        break;
+      }
 
-          // Update progress (remaining lines) about once a second
-          static unsigned long lastProg = 0;
-          if (millis() - lastProg > 1000) {
-            lastProg = millis();
-            int remaining = countOfflineLines();
-            if (flushTotal < remaining) {
-              // New data added while flushing; extend total so progress stays sane
-              flushTotal = remaining + flushSent;
-            }
-            int total = (flushTotal <= 0) ? (remaining) : flushTotal;
-            int sent = max(0, total - remaining);
-            flushSent = sent;
-            // Spinner animation
-            const char spinnerChars[4] = {'|','/','-','\\'};
-            static uint8_t spIdx = 0; spIdx = (spIdx + 1) & 0x03;
+      // If internet not reachable yet, show checking message and wait here
+      static unsigned long lastCheck = 0;
+      static unsigned long lastAnimChk = 0;
+      static uint8_t spIdxChk = 0;
+      const char spinnerChk[4] = {'|','/','-','\\'};
+      if (!isApiReachable()) {
+        if (millis() - lastAnimChk > 200) {
+          lastAnimChk = millis();
+          spIdxChk = (spIdxChk + 1) & 0x03;
+          lcd.setCursor(0, 0);
+          lcd.print("Checking internet");
+          lcd.setCursor(15, 0);
+          lcd.print(spinnerChk[spIdxChk]);
+          lcd.setCursor(0, 1);
+          lcd.print("                ");
+        }
+        break; // stay until internet is reachable
+      }
 
-            // Line 1 only: "Sending s/t pp% <spin>"
-            lcd.setCursor(0, 0);
-            lcd.print("                "); // clear line
-            lcd.setCursor(0, 0);
-            int pct = (total > 0) ? (sent * 100) / total : 0;
-            lcd.print("Sending "); lcd.print(sent); lcd.print("/"); lcd.print(total); lcd.print(" "); lcd.print(pct); lcd.print("%");
-            lcd.setCursor(15, 0); lcd.print(spinnerChars[spIdx]);
-            // Clear line 2 text-only
-            lcd.setCursor(0, 1);
-            lcd.print("                ");
-          }
+      // Simple loading animation only (no numbers/percent)
+      static unsigned long lastAnim = 0;
+      static uint8_t animPos = 0;
+      static const char spinnerChars[4] = {'|','/','-','\\'};
+      static uint8_t spIdx = 0;
+      if (millis() - lastAnim > 200) {
+        lastAnim = millis();
+        spIdx = (spIdx + 1) & 0x03;
+        animPos = (animPos + 1) % 16;
 
-          // Flush a small batch each loop
-          bool done = flushOfflineQueue();
-          if (done || !hasOfflineData()) {
-            // Finished sending queued data; go to idle prompt
-            flushTotal = -1;
-            flushSent = 0;
-            showPressPlant();
-            state = WAIT_FOR_PLANT_SELECTION;
-            stateTs = millis();
-          }
-          break; }
+        // Line 0: "Sending" + spinner
+        lcd.setCursor(0, 0);
+        lcd.print("                ");
+        lcd.setCursor(3, 0);
+        lcd.print("Sending");
+        lcd.setCursor(15, 0);
+        lcd.print(spinnerChars[spIdx]);
+
+        // Line 1: moving block
+        lcd.setCursor(0, 1);
+        lcd.print("                ");
+        lcd.setCursor(animPos, 1);
+        lcd.print((char)255);
+      }
+
+      // Flush a generous batch each loop
+      bool done = flushOfflineQueue();
+      if (done || !hasOfflineData()) {
+        // Finished sending queued data; go to idle prompt
+        flushTotal = -1;
+        flushSent = 0;
+        showPressPlant();
+        state = WAIT_FOR_PLANT_SELECTION;
+        stateTs = millis();
+      }
+      break; }
     }
 
     delay(15);
