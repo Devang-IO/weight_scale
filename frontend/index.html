@@ -91,10 +91,28 @@
             font-weight: 600;
             text-align: center;
         }
+
+        /* Fixed top error bar */
+        .top-error {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 9999;
+            display: none;
+            background: #b71c1c;
+            color: #fff;
+            padding: 10px 16px;
+            font-weight: 600;
+            text-align: center;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+        }
+        body.with-topbar { padding-top: 48px; }
     </style>
 </head>
 
 <body>
+    <div id="netErrorBar" class="top-error">Connection lost — check your internet</div>
     <div class="container">
         <h1>Weights Monitoring</h1>
 
@@ -132,6 +150,21 @@
                 .order('created_at', { ascending: false });
             if (error) throw error;
             return data;
+        }
+
+        function showTopError(msg) {
+            const bar = document.getElementById('netErrorBar');
+            if (!bar) return;
+            bar.textContent = msg || 'Connection lost — check your internet';
+            bar.style.display = 'block';
+            document.body.classList.add('with-topbar');
+        }
+
+        function hideTopError() {
+            const bar = document.getElementById('netErrorBar');
+            if (!bar) return;
+            bar.style.display = 'none';
+            document.body.classList.remove('with-topbar');
         }
 
         // Load and display data
@@ -204,12 +237,14 @@
                 updateLastUpdatedTime();
                 // Hide WiFi-disconnected banner on success
                 if (wifiBanner) wifiBanner.style.display = 'none';
+                hideTopError();
 
             } catch (error) {
                 console.error('Error loading data:', error);
                 contentDiv.innerHTML = `<div class="error">Error loading data: ${error.message}</div>`;
                 // Show WiFi-disconnected banner on error
                 if (wifiBanner) wifiBanner.style.display = 'block';
+                showTopError('Cannot load data — offline or API unreachable');
             }
         }
 
@@ -224,12 +259,14 @@
                         updateLastUpdatedTime();
                         const wifiBanner = document.getElementById('wifiStatus');
                         if (wifiBanner) wifiBanner.style.display = 'none';
+                        hideTopError();
                     })
                     .subscribe((status) => {
                         // If channel errors or closes, show banner
                         if (status === 'CHANNEL_ERROR' || status === 'CLOSED' || status === 'TIMED_OUT') {
                             const wifiBanner = document.getElementById('wifiStatus');
                             if (wifiBanner) wifiBanner.style.display = 'block';
+                            showTopError('Live updates disconnected');
                         }
                     });
 
@@ -239,8 +276,10 @@
                     if (!wifiBanner) return;
                     if (s === 'connected') {
                         wifiBanner.style.display = 'none';
+                        hideTopError();
                     } else if (s === 'disconnected' || s === 'closed' || s === 'connecting') {
                         wifiBanner.style.display = 'block';
+                        showTopError('Live updates disconnected');
                     }
                 });
             } catch (e) {
@@ -280,10 +319,12 @@
         window.addEventListener('online', () => {
             const wifiBanner = document.getElementById('wifiStatus');
             if (wifiBanner) wifiBanner.style.display = 'none';
+            hideTopError();
         });
         window.addEventListener('offline', () => {
             const wifiBanner = document.getElementById('wifiStatus');
             if (wifiBanner) wifiBanner.style.display = 'block';
+            showTopError('You are offline');
         });
 
         // Initialize when page loads
@@ -293,6 +334,7 @@
             if (!navigator.onLine) {
                 const wifiBanner = document.getElementById('wifiStatus');
                 if (wifiBanner) wifiBanner.style.display = 'block';
+                showTopError('You are offline');
             }
         });
     </script>
