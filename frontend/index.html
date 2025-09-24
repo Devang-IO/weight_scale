@@ -130,6 +130,32 @@
             border: 1px solid #ccc;
             border-radius: 4px;
         }
+        .summary-cards {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            margin-top: 10px;
+        }
+        .card {
+            background: #fafafa;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            padding: 12px;
+        }
+        .card h3 {
+            margin: 0 0 6px 0;
+            font-size: 14px;
+            color: #555;
+        }
+        .card .value {
+            font-size: 20px;
+            font-weight: 700;
+            color: #333;
+        }
+        .muted { color: #777; font-size: 12px; }
+        .page-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+        .page-btn { padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
     </style>
 </head>
 
@@ -143,16 +169,34 @@
 
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
             <div class="controls">
-                <button class="refresh-btn" onclick="loadData()">Refresh Now</button>
-                <input id="datePicker" class="date-input" type="date" onchange="loadData()" />
+                <button class="refresh-btn" onclick="loadData(1)">Refresh Now</button>
+                <label class="muted">From</label>
+                <input id="fromDate" class="date-input" type="date" onchange="loadData(1)" />
+                <label class="muted">To</label>
+                <input id="toDate" class="date-input" type="date" onchange="loadData(1)" />
+                <button class="refresh-btn" style="background:#1976d2;" onclick="downloadCSV()">Download CSV</button>
             </div>
             <div class="controls">
-                <button class="danger-btn" onclick="clearAllReadings()">Clear All Readings</button>
+                <label class="muted"><input type="checkbox" id="adminCheck" onchange="toggleAdminGate()" /> I'm admin</label>
+                <button id="clearBtn" class="danger-btn" onclick="clearAllReadings()" disabled>Clear All Readings</button>
                 <span id="lastUpdated" class="timestamp"></span>
             </div>
         </div>
         <div id="content">
             <div class="loading">Loading data...</div>
+        </div>
+        <div id="summary" class="summary-cards" style="display:none;"></div>
+        <div id="pager" class="page-controls" style="display:none;">
+            <button id="prevPage" class="page-btn" onclick="changePage(-1)">Prev</button>
+            <span class="muted">Page <span id="pageNum">1</span></span>
+            <button id="nextPage" class="page-btn" onclick="changePage(1)">Next</button>
+            <span style="flex:1"></span>
+            <label class="muted">Page size</label>
+            <select id="pageSize" class="date-input" onchange="loadData(1)">
+                <option value="20">20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+            </select>
         </div>
     </div>
 
@@ -164,6 +208,11 @@
             key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0.AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g'
         };
         let supa = null; // will initialize after library loads
+        // UI state
+        let currentPage = 1;
+        let totalRows = 0;
+        let currentPageSize = 20;
+        let realtimeChannel = null;
 
         async function loadSupabaseLibrary() {
             // If already present, return
@@ -230,41 +279,76 @@
             document.body.classList.remove('with-topbar');
         }
 
-        // Load and display data
-        async function loadData() {
+        // Helpers to read filters
+        function getDateRangeISO() {
+            const fromEl = document.getElementById('fromDate');
+            const toEl = document.getElementById('toDate');
+            const from = fromEl && fromEl.value ? new Date(`${fromEl.value}T00:00:00`) : null;
+            const to = toEl && toEl.value ? new Date(`${toEl.value}T23:59:59.999`) : null;
+            return {
+                startIso: from ? from.toISOString() : null,
+                endIso: to ? to.toISOString() : null
+            };
+        }
+
+        function toggleAdminGate() {
+            const checked = document.getElementById('adminCheck').checked;
+            const btn = document.getElementById('clearBtn');
+            btn.disabled = !checked;
+        }
+
+        function updatePagerVisibility() {
+            const pager = document.getElementById('pager');
+            if (totalRows > currentPageSize) {
+                pager.style.display = 'flex';
+            } else {
+                pager.style.display = 'none';
+            }
+            document.getElementById('pageNum').textContent = String(currentPage);
+        }
+
+        // Load and display data (pageNumber optional)
+        async function loadData(pageNumber) {
             const ok = await ensureSupaClient();
             if (!ok) {
                 const contentDiv = document.getElementById('content');
                 contentDiv.innerHTML = '<div class="error">Supabase not available. Check your internet and refresh.</div>';
                 return;
             }
+            if (pageNumber) currentPage = pageNumber;
+            const pageSizeSel = document.getElementById('pageSize');
+            if (pageSizeSel) currentPageSize = parseInt(pageSizeSel.value || '20', 10);
             const contentDiv = document.getElementById('content');
             const wifiBanner = document.getElementById('wifiStatus');
             contentDiv.innerHTML = '<div class="loading">Loading data...</div>';
 
             try {
-                // Build query with optional date filter
-                const dateEl = document.getElementById('datePicker');
-                const selectedDate = dateEl && dateEl.value ? dateEl.value : null; // yyyy-mm-dd
-                let query = supa
+                // Build query with optional date range filter
+                const { startIso, endIso } = getDateRangeISO();
+                // Count total rows for pagination
+                let countQuery = supa.from('weights').select('*', { count: 'exact', head: true });
+                if (startIso) countQuery = countQuery.gte('created_at', startIso);
+                if (endIso) countQuery = countQuery.lt('created_at', endIso);
+                const { count, error: countErr } = await countQuery;
+                if (countErr) throw countErr;
+                totalRows = count || 0;
+
+                // Paged data query
+                let dataQuery = supa
                     .from('weights')
                     .select('*')
-                    .order('created_at', { ascending: false });
+                    .order('created_at', { ascending: false })
+                    .range((currentPage - 1) * currentPageSize, currentPage * currentPageSize - 1);
+                if (startIso) dataQuery = dataQuery.gte('created_at', startIso);
+                if (endIso) dataQuery = dataQuery.lt('created_at', endIso);
 
-                if (selectedDate) {
-                    // Create local day range and convert to ISO for comparison
-                    const start = new Date(`${selectedDate}T00:00:00`);
-                    const end = new Date(`${selectedDate}T23:59:59.999`);
-                    const startIso = start.toISOString();
-                    const endIso = end.toISOString();
-                    query = query.gte('created_at', startIso).lt('created_at', endIso);
-                }
-
-                const { data, error } = await query;
+                const { data, error } = await dataQuery;
                 if (error) throw error;
 
                 if (!data || data.length === 0) {
                     contentDiv.innerHTML = '<div class="loading">No data available yet.</div>';
+                    document.getElementById('summary').style.display = 'none';
+                    updatePagerVisibility();
                     return;
                 }
 
@@ -318,6 +402,9 @@
                 `;
 
                 contentDiv.innerHTML = tableHTML;
+                // Summary cards
+                renderSummary(data);
+                updatePagerVisibility();
                 updateLastUpdatedTime();
                 // Hide WiFi-disconnected banner on success
                 if (wifiBanner) wifiBanner.style.display = 'none';
@@ -332,6 +419,75 @@
             }
         }
 
+        function changePage(delta) {
+            const maxPage = Math.max(1, Math.ceil(totalRows / currentPageSize));
+            let next = currentPage + delta;
+            if (next < 1) next = 1;
+            if (next > maxPage) next = maxPage;
+            if (next !== currentPage) loadData(next);
+            document.getElementById('prevPage').disabled = next <= 1;
+            document.getElementById('nextPage').disabled = next >= maxPage;
+        }
+
+        function renderSummary(rows) {
+            const sumDiv = document.getElementById('summary');
+            if (!rows || rows.length === 0) { sumDiv.style.display = 'none'; return; }
+            const plants = [...Array(10).keys()].map(i => `plant_${i}`);
+            const totals = { rows: rows.length };
+            const counts = {}; const sums = {};
+            plants.forEach(p => { counts[p] = 0; sums[p] = 0; });
+            rows.forEach(r => {
+                plants.forEach(p => {
+                    const v = r[p];
+                    if (typeof v === 'number') { counts[p]++; sums[p] += v; }
+                });
+            });
+            const avg = {};
+            plants.forEach(p => { avg[p] = counts[p] ? (sums[p] / counts[p]) : 0; });
+            // Build cards: total rows + plant averages for those with data
+            let html = '';
+            html += `<div class="card"><h3>Total rows (page)</h3><div class="value">${rows.length}</div></div>`;
+            const avgList = plants.filter(p => counts[p] > 0).slice(0, 6); // show up to 6
+            avgList.forEach(p => {
+                html += `<div class="card"><h3>Avg ${p.replace('_',' ')} (page)</h3><div class="value">${avg[p].toFixed(1)} g</div><div class="muted">${counts[p]} rows</div></div>`;
+            });
+            sumDiv.innerHTML = html;
+            sumDiv.style.display = 'grid';
+        }
+
+        async function downloadCSV() {
+            const ok = await ensureSupaClient();
+            if (!ok) { alert('Supabase not available'); return; }
+            const { startIso, endIso } = getDateRangeISO();
+            // Fetch all matching rows (cap to a reasonable limit)
+            let q = supa.from('weights').select('*').order('created_at', { ascending: false }).limit(10000);
+            if (startIso) q = q.gte('created_at', startIso);
+            if (endIso) q = q.lt('created_at', endIso);
+            const { data, error } = await q;
+            if (error) { alert('CSV fetch failed: ' + error.message); return; }
+            if (!data || data.length === 0) { alert('No data to export'); return; }
+            const header = ['id','plant_0','plant_1','plant_2','plant_3','plant_4','plant_5','plant_6','plant_7','plant_8','plant_9','created_at'];
+            const lines = [header.join(',')];
+            data.forEach(r => {
+                const row = header.map(h => {
+                    const v = r[h];
+                    if (v == null) return '';
+                    if (typeof v === 'string' && v.includes(',')) return '"' + v.replace(/"/g,'""') + '"';
+                    return String(v);
+                });
+                lines.push(row.join(','));
+            });
+            const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const date = new Date();
+            a.download = `weights_${date.toISOString().slice(0,10)}.csv`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }
         async function clearAllReadings() {
             const okClient = await ensureSupaClient();
             if (!okClient) { alert('Supabase not available. Check your internet.'); return; }
@@ -357,10 +513,16 @@
             const ok = await ensureSupaClient();
             if (!ok) return;
             try {
+                if (realtimeChannel) { try { supa.removeChannel(realtimeChannel); } catch(e) {} }
                 const channel = supa
                     .channel('weights-changes')
                     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'weights' }, payload => {
-                        // Prepend the new row to the table without full reload
+                        // Respect current filters: only prepend when row matches filter and we are on page 1
+                        if (currentPage !== 1) return;
+                        const { startIso, endIso } = getDateRangeISO();
+                        const created = new Date(payload.new.created_at).toISOString();
+                        if (startIso && created < startIso) return;
+                        if (endIso && created >= endIso) return;
                         prependRow(payload.new);
                         updateLastUpdatedTime();
                         const wifiBanner = document.getElementById('wifiStatus');
@@ -375,19 +537,24 @@
                             showTopError('Live updates disconnected');
                         }
                     });
+                realtimeChannel = channel;
 
-                // Track realtime connection state globally
-                supa.realtime.onConnectionStateChange((s) => {
-                    const wifiBanner = document.getElementById('wifiStatus');
-                    if (!wifiBanner) return;
-                    if (s === 'connected') {
-                        wifiBanner.style.display = 'none';
-                        hideTopError();
-                    } else if (s === 'disconnected' || s === 'closed' || s === 'connecting') {
-                        wifiBanner.style.display = 'block';
-                        showTopError('Live updates disconnected');
-                    }
-                });
+                // Track realtime connection state
+                try {
+                    supa.realtime.onConnectionStateChange((s) => {
+                        const wifiBanner = document.getElementById('wifiStatus');
+                        if (!wifiBanner) return;
+                        if (s === 'connected') {
+                            wifiBanner.style.display = 'none';
+                            hideTopError();
+                        } else if (s === 'disconnected' || s === 'closed' || s === 'connecting') {
+                            wifiBanner.style.display = 'block';
+                            showTopError('Live updates disconnected');
+                        }
+                    });
+                } catch(e) {
+                    console.warn('Realtime connection state hook failed:', e);
+                }
             } catch (e) {
                 console.warn('Realtime init failed:', e);
             }
