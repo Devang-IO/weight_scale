@@ -108,10 +108,33 @@
             box-shadow: 0 2px 6px rgba(0,0,0,0.2);
         }
         body.with-topbar { padding-top: 48px; }
+        
+        /* New controls */
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .danger-btn {
+            background: #d32f2f;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .danger-btn:hover { background: #b71c1c; }
+        .date-input {
+            padding: 8px 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
     </style>
 </head>
 
 <body>
+    <link rel="icon" href="data:,">
     <div id="netErrorBar" class="top-error">Connection lost — check your internet</div>
     <div class="container">
         <h1>Weights Monitoring</h1>
@@ -119,8 +142,12 @@
         <div id="wifiStatus" class="wifi-banner">WiFi disconnected — showing last loaded data</div>
 
         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-            <button class="refresh-btn" onclick="loadData()">Refresh Now</button>
-            <div>
+            <div class="controls">
+                <button class="refresh-btn" onclick="loadData()">Refresh Now</button>
+                <input id="datePicker" class="date-input" type="date" onchange="loadData()" />
+            </div>
+            <div class="controls">
+                <button class="danger-btn" onclick="clearAllReadings()">Clear All Readings</button>
                 <span id="lastUpdated" class="timestamp"></span>
             </div>
         </div>
@@ -136,7 +163,42 @@
             url: 'https://zoblfvpwqodiuudwitwt.supabase.co',
             key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0.AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g'
         };
-        const supa = supabase.createClient(config.url, config.key);
+        let supa = null; // will initialize after library loads
+
+        async function loadSupabaseLibrary() {
+            // If already present, return
+            if (typeof window.supabase !== 'undefined') return true;
+            // Try to dynamically load a fallback CDN once
+            return new Promise((resolve) => {
+                const script = document.createElement('script');
+                script.src = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.3/dist/umd/supabase.js';
+                script.async = true;
+                script.onload = () => resolve(true);
+                script.onerror = () => resolve(false);
+                document.head.appendChild(script);
+                // Also set a timeout fallback
+                setTimeout(() => {
+                    if (typeof window.supabase !== 'undefined') resolve(true);
+                }, 2000);
+            });
+        }
+
+        async function ensureSupaClient() {
+            if (supa) return true;
+            const ok = await loadSupabaseLibrary();
+            if (!ok || typeof window.supabase === 'undefined') {
+                showTopError('Supabase library failed to load');
+                return false;
+            }
+            try {
+                supa = window.supabase.createClient(config.url, config.key);
+                return true;
+            } catch (e) {
+                console.error('Failed to init Supabase client', e);
+                showTopError('Failed to initialize Supabase');
+                return false;
+            }
+        }
 
         function updateLastUpdatedTime() {
             const now = new Date();
@@ -144,6 +206,7 @@
         }
 
         async function supabaseQuery(table, options = {}) {
+            // Kept for compatibility but not used by loadData after date-filter update
             const { data, error } = await supa
                 .from(table)
                 .select(options.select || '*')
@@ -169,15 +232,36 @@
 
         // Load and display data
         async function loadData() {
+            const ok = await ensureSupaClient();
+            if (!ok) {
+                const contentDiv = document.getElementById('content');
+                contentDiv.innerHTML = '<div class="error">Supabase not available. Check your internet and refresh.</div>';
+                return;
+            }
             const contentDiv = document.getElementById('content');
             const wifiBanner = document.getElementById('wifiStatus');
             contentDiv.innerHTML = '<div class="loading">Loading data...</div>';
 
             try {
-                const data = await supabaseQuery('weights', {
-                    select: '*',
-                    order: 'created_at.desc'
-                });
+                // Build query with optional date filter
+                const dateEl = document.getElementById('datePicker');
+                const selectedDate = dateEl && dateEl.value ? dateEl.value : null; // yyyy-mm-dd
+                let query = supa
+                    .from('weights')
+                    .select('*')
+                    .order('created_at', { ascending: false });
+
+                if (selectedDate) {
+                    // Create local day range and convert to ISO for comparison
+                    const start = new Date(`${selectedDate}T00:00:00`);
+                    const end = new Date(`${selectedDate}T23:59:59.999`);
+                    const startIso = start.toISOString();
+                    const endIso = end.toISOString();
+                    query = query.gte('created_at', startIso).lt('created_at', endIso);
+                }
+
+                const { data, error } = await query;
+                if (error) throw error;
 
                 if (!data || data.length === 0) {
                     contentDiv.innerHTML = '<div class="loading">No data available yet.</div>';
@@ -248,8 +332,30 @@
             }
         }
 
+        async function clearAllReadings() {
+            const okClient = await ensureSupaClient();
+            if (!okClient) { alert('Supabase not available. Check your internet.'); return; }
+            const ok = confirm('This will permanently delete ALL readings. Continue?');
+            if (!ok) return;
+            try {
+                const { error } = await supa
+                    .from('weights')
+                    .delete()
+                    .gt('id', 0); // Supabase requires a filter; this matches all typical positive ids
+                if (error) throw error;
+                alert('All readings cleared');
+                loadData();
+            } catch (e) {
+                console.error('Clear failed:', e);
+                showTopError('Failed to clear readings');
+                alert('Failed to clear readings: ' + (e.message || e));
+            }
+        }
+
         // Realtime: listen for inserts on weights and refresh just the top of the table
-        function startRealtime() {
+        async function startRealtime() {
+            const ok = await ensureSupaClient();
+            if (!ok) return;
             try {
                 const channel = supa
                     .channel('weights-changes')
@@ -328,9 +434,15 @@
         });
 
         // Initialize when page loads
-        document.addEventListener('DOMContentLoaded', () => {
-            loadData();
-            startRealtime();
+        document.addEventListener('DOMContentLoaded', async () => {
+            const ok = await ensureSupaClient();
+            if (ok) {
+                await loadData();
+                startRealtime();
+            } else {
+                const contentDiv = document.getElementById('content');
+                contentDiv.innerHTML = '<div class="error">Cannot initialize — Supabase library missing.</div>';
+            }
             if (!navigator.onLine) {
                 const wifiBanner = document.getElementById('wifiStatus');
                 if (wifiBanner) wifiBanner.style.display = 'block';
