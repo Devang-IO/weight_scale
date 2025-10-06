@@ -105,10 +105,13 @@
             padding: 10px 16px;
             font-weight: 600;
             text-align: center;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
         }
-        body.with-topbar { padding-top: 48px; }
-        
+
+        body.with-topbar {
+            padding-top: 48px;
+        }
+
         /* New controls */
         .controls {
             display: flex;
@@ -116,6 +119,7 @@
             align-items: center;
             flex-wrap: wrap;
         }
+
         .danger-btn {
             background: #d32f2f;
             color: #fff;
@@ -124,38 +128,67 @@
             border-radius: 4px;
             cursor: pointer;
         }
-        .danger-btn:hover { background: #b71c1c; }
+
+        .danger-btn:hover {
+            background: #b71c1c;
+        }
+
         .date-input {
             padding: 8px 10px;
             border: 1px solid #ccc;
             border-radius: 4px;
         }
+
         .summary-cards {
             display: grid;
             grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
             gap: 12px;
             margin-top: 10px;
         }
+
         .card {
             background: #fafafa;
             border: 1px solid #eee;
             border-radius: 6px;
             padding: 12px;
         }
+
         .card h3 {
             margin: 0 0 6px 0;
             font-size: 14px;
             color: #555;
         }
+
         .card .value {
             font-size: 20px;
             font-weight: 700;
             color: #333;
         }
-        .muted { color: #777; font-size: 12px; }
-        .page-controls { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-        .page-btn { padding: 6px 10px; border-radius: 4px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
-        .page-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .muted {
+            color: #777;
+            font-size: 12px;
+        }
+
+        .page-controls {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .page-btn {
+            padding: 6px 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            background: #fff;
+            cursor: pointer;
+        }
+
+        .page-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 
@@ -177,8 +210,10 @@
                 <button class="refresh-btn" style="background:#1976d2;" onclick="downloadCSV()">Download CSV</button>
             </div>
             <div class="controls">
-                <label class="muted"><input type="checkbox" id="adminCheck" onchange="toggleAdminGate()" /> I'm admin</label>
-                <button id="clearBtn" class="danger-btn" onclick="clearAllReadings()" disabled>Clear All Readings</button>
+                <label class="muted"><input type="checkbox" id="adminCheck" onchange="toggleAdminGate()" /> I'm
+                    admin</label>
+                <button id="clearBtn" class="danger-btn" onclick="clearAllReadings()" disabled>Clear All
+                    Readings</button>
                 <span id="lastUpdated" class="timestamp"></span>
             </div>
         </div>
@@ -375,7 +410,7 @@
                 `;
 
                 data.forEach(row => {
-                    const formatWeight = (weight) => weight ? `${weight}g` : '-';
+                    const formatWeight = (weight) => (typeof weight === 'number') ? `${Number(weight).toFixed(2)} g` : '-';
                     const formatDate = (dateStr) => new Date(dateStr).toLocaleString();
 
                     tableHTML += `
@@ -444,12 +479,12 @@
             });
             const avg = {};
             plants.forEach(p => { avg[p] = counts[p] ? (sums[p] / counts[p]) : 0; });
-            // Build cards: total rows + plant averages for those with data
+            // Build cards: total rows + plant averages for all plants with data
             let html = '';
             html += `<div class="card"><h3>Total rows (page)</h3><div class="value">${rows.length}</div></div>`;
-            const avgList = plants.filter(p => counts[p] > 0).slice(0, 6); // show up to 6
+            const avgList = plants.filter(p => counts[p] > 0); // show all plants with data
             avgList.forEach(p => {
-                html += `<div class="card"><h3>Avg ${p.replace('_',' ')} (page)</h3><div class="value">${avg[p].toFixed(1)} g</div><div class="muted">${counts[p]} rows</div></div>`;
+                html += `<div class="card"><h3>Avg ${p.replace('_', ' ')} (page)</h3><div class="value">${avg[p].toFixed(2)} g</div><div class="muted">${counts[p]} rows</div></div>`;
             });
             sumDiv.innerHTML = html;
             sumDiv.style.display = 'grid';
@@ -466,13 +501,13 @@
             const { data, error } = await q;
             if (error) { alert('CSV fetch failed: ' + error.message); return; }
             if (!data || data.length === 0) { alert('No data to export'); return; }
-            const header = ['id','plant_0','plant_1','plant_2','plant_3','plant_4','plant_5','plant_6','plant_7','plant_8','plant_9','created_at'];
+            const header = ['id', 'plant_0', 'plant_1', 'plant_2', 'plant_3', 'plant_4', 'plant_5', 'plant_6', 'plant_7', 'plant_8', 'plant_9', 'created_at'];
             const lines = [header.join(',')];
             data.forEach(r => {
                 const row = header.map(h => {
                     const v = r[h];
                     if (v == null) return '';
-                    if (typeof v === 'string' && v.includes(',')) return '"' + v.replace(/"/g,'""') + '"';
+                    if (typeof v === 'string' && v.includes(',')) return '"' + v.replace(/"/g, '""') + '"';
                     return String(v);
                 });
                 lines.push(row.join(','));
@@ -482,7 +517,7 @@
             const a = document.createElement('a');
             a.href = url;
             const date = new Date();
-            a.download = `weights_${date.toISOString().slice(0,10)}.csv`;
+            a.download = `weights_${date.toISOString().slice(0, 10)}.csv`;
             document.body.appendChild(a);
             a.click();
             document.body.removeChild(a);
@@ -513,7 +548,7 @@
             const ok = await ensureSupaClient();
             if (!ok) return;
             try {
-                if (realtimeChannel) { try { supa.removeChannel(realtimeChannel); } catch(e) {} }
+                if (realtimeChannel) { try { supa.removeChannel(realtimeChannel); } catch (e) { } }
                 const channel = supa
                     .channel('weights-changes')
                     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'weights' }, payload => {
@@ -552,7 +587,7 @@
                             showTopError('Live updates disconnected');
                         }
                     });
-                } catch(e) {
+                } catch (e) {
                     console.warn('Realtime connection state hook failed:', e);
                 }
             } catch (e) {
@@ -568,7 +603,7 @@
                 loadData();
                 return;
             }
-            const formatWeight = (w) => w ? `${w}g` : '-';
+            const formatWeight = (w) => (typeof w === 'number') ? `${Number(w).toFixed(2)} g` : '-';
             const formatDate = (d) => new Date(d).toLocaleString();
             const tr = document.createElement('tr');
             tr.innerHTML = `

@@ -14,7 +14,7 @@ char keys[ROWS][COLS] = {
 
 // Pin connections (swap rows 3 & 4 compared to your previous code)
 byte rowPins[ROWS] = {13, 12, 27, 14}; // <-- swapped index 2 & 3
-byte colPins[COLS] = {26, 33, 32};     // C1, C2, C3
+byte colPins[COLS] = {26, 33, 25};     // C1, C2, C3 (changed 32 to 25)
 
 // Create Keypad object
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
@@ -24,6 +24,15 @@ String inputBuffer = "";
 
 void setup() {
   Serial.begin(115200);
+  
+  // Enable internal pull-ups for all keypad pins
+  for (int i = 0; i < ROWS; i++) {
+    pinMode(rowPins[i], INPUT_PULLUP);
+  }
+  for (int i = 0; i < COLS; i++) {
+    pinMode(colPins[i], INPUT_PULLUP);
+  }
+  
   Serial.println("Keypad Test Ready!");
   Serial.println("Press '*' to Enter, '#' to Clear");
 }
@@ -59,5 +68,5 @@ Row 3	R3	GPIO 14
 Row 4	R4	GPIO 27
 Col 1	C1	GPIO 26
 Col 2	C2	GPIO 33
-Col 3	C3	GPIO 32
+Col 3	C3	GPIO 25
 */

@@ -1,12 +1,15 @@
 /*
- * Finalv5_NTP.ino
- * Variant of Finalv5 that syncs DS3231 RTC from NTP at boot when WiFi is available.
- * - Preserves Finalv5 user flow and features.
- * - On boot: connect WiFi -> NTP sync -> set RTC -> continue normal flow.
+ * new_final.ino
+ * Clean, reliable ESP32 weight logger with online/offline modes and RTC sync.
  *
- * Notes:
- * - Uses configTime() for NTP (pool.ntp.org) with offset 0 (UTC). RTC and payloads remain UTC (with trailing 'Z').
- * - If NTP fails or WiFi down, falls back to existing RTC time.
+ * Features
+ * - Same pins and Supabase API config as existing sketches
+ * - calFactor = 360.0 (initial); simple stable measurement with 2-decimal display
+ * - Online send: try twice; if fails or WiFi down -> queue to SD (NDJSON, same JSON per line as POST body)
+ * - Instant flush of entire queue as soon as WiFi is connected and API reachable
+ * - WiFi connect/disconnect toast + WiFi badge in LCD corner
+ * - Boot time NTP sync to set DS3231 RTC (UTC); created_at uses RTC time
+ * - Flow: Ask plant -> Prompt place item -> Wait stable -> Measure -> Send/Queue -> Show result -> Wait removal -> Back to ask plant
  */
 
 #include <Arduino.h>
@@ -28,13 +31,19 @@ const char *password = "YOUR_WIFI_PASSWORD"; // TODO: set
 
 // ----------------- Supabase Configuration -----------------
 const char *supabaseUrl = "https://zoblfvpwqodiuudwitwt.supabase.co";
-const char *supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0.AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g";
+const char *supabaseKey =
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9."
+    "eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpvYmxmdnB3cW9kaXV1ZHdpdHd0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTc5MzA0OTAsImV4cCI6MjA3MzUwNjQ5MH0."
+    "AG0TqekNZ505BodHamvdhQ3A4lk0OtsLrJBGC1YlP3g";
 
 // ----------------- Hardware Pin Configuration -----------------
+// HX711 Load Cell
 const int HX711_DOUT = 23;
 const int HX711_SCK = 22;
+// I2C (LCD + RTC)
 const int I2C_SDA = 18;
 const int I2C_SCL = 19;
+// Keypad (3x4)
 const byte ROWS = 4;
 const byte COLS = 3;
 char keys[ROWS][COLS] = {
@@ -44,7 +53,8 @@ char keys[ROWS][COLS] = {
     {'*', '0', '#'}};
 byte rowPins[ROWS] = {13, 12, 27, 14};
 byte colPins[COLS] = {26, 33, 32};
-const int SD_CS_PIN = 5;
+// SD (SPI)
+const int SD_CS_PIN = 5; // HSPI mapping via SPI.begin() below
 const int SD_SCK_PIN = 16;
 const int SD_MISO_PIN = 17;
 const int SD_MOSI_PIN = 21;
@@ -57,137 +67,89 @@ Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 RTC_DS3231 rtc;
 Preferences prefs;
 
-// ----------------- Config -----------------
-float calFactor = 360.0f;
-const float MIN_WEIGHT_THRESHOLD = 5.0f;
-const int STABLE_DURATION_MS = 600;
-const int REMOVED_DURATION_MS = 150;
-const int STABILITY_SAMPLES = 120;
-const int STABILITY_DELAY_MS = 12;
-const float STDDEV_THRESHOLD_G = 0.8f;
-const float TRIM_FRACTION = 0.1f;
-const unsigned long BOOT_CHECK_DURATION_MS = 2000;
-const float BOOT_EMPTY_MAX_ABS_G = 2.0f;
-const float BOOT_EMPTY_MAX_STD_G = 1.5f;
-const bool ENABLE_AUTO_ZERO = true;
-const float AUTO_ZERO_MAX_ABS_G = 1.0f;
-const float AUTO_ZERO_MAX_STD_G = 0.5f;
-const unsigned long AUTO_ZERO_MIN_IDLE_MS = 5000;
-const unsigned long AUTO_ZERO_COOLDOWN_MS = 15000;
-const unsigned long API_CHECK_INTERVAL_MS = 10000;
+// ----------------- Configuration -----------------
+float calFactor = 360.0f;                // initial calibration factor
+const float MIN_WEIGHT_THRESHOLD = 5.0f; // grams to consider item present
+// Stable measurement parameters
+const int STABILITY_SAMPLES = 80;
+const int STABILITY_DELAY_MS = 15;
+const float STDDEV_THRESHOLD_G = 0.8f; // threshold for stability
+const float TRIM_FRACTION = 0.1f;      // trim extreme values before mean
 
+const int STABLE_DURATION_MS = 600;  // present for this long before capture
+const int REMOVED_DURATION_MS = 150; // removed for this long to reset
+
+// ----------------- State Machine -----------------
 enum State
 {
-  SHOW_PRESS_PLANT,
-  WAIT_FOR_PLANT_SELECTION,
-  WAIT_FOR_ITEM_PRESENT_STABLE,
+  WAIT_FOR_PLANT,
+  WAIT_FOR_ITEM_STABLE,
   MEASURE_AND_SEND,
-  WAIT_FOR_ITEM_REMOVAL_STABLE,
-  FLUSHING_OFFLINE
+  WAIT_FOR_REMOVAL,
+  FLUSHING
 };
-State state = SHOW_PRESS_PLANT;
+
+State state = WAIT_FOR_PLANT;
 int selectedPlant = -1;
 unsigned long stateTs = 0;
-int flushTotal = -1;
-int flushSent = 0;
-bool lastWifiConnected = false;
 bool itemPresent = false;
 unsigned long presentSince = 0;
 unsigned long removedSince = 0;
+
+bool lastWifiConnected = false;
 bool apiReachableCached = false;
 unsigned long lastApiCheckMs = 0;
-unsigned long idleSinceMs = 0;
-unsigned long lastAutoZeroMs = 0;
 
-// Fwds
+// ----------------- Fwds -----------------
 void initializeHardware();
 void connectToWiFi();
-bool sendToSupabase(int plantNumber, float weight, const String &iso8601);
-void showPressPlant();
-void showWifiToast(const char *msg);
-void updateWifiBadge();
-bool isItemPresent(float weight);
-bool measureStableWeight(float &outMeanG);
+void syncRtcFromNtp();
 String getISO8601();
+bool sendToSupabase(int plantNumber, float weight, const String &iso8601);
 void ensureSD();
 void queueOffline(int plantNumber, float weight, const String &iso8601);
 bool flushOfflineQueue();
 bool hasOfflineData();
 bool isApiReachableCached();
-void doUserTare();
-bool bootEmptyCheckAndTare();
-void maybeAutoZero(float currentW);
 
-static float clampf(float x, float lo, float hi) { return x < lo ? lo : (x > hi ? hi : x); }
+void showPromptPlant();
+void showWifiToast(const char *msg);
+void updateWifiBadge();
+bool measureStableWeight(float &outMeanG);
+bool isItemPresent(float g);
 
+// ----------------- Setup/Loop -----------------
 void setup()
 {
   Serial.begin(115200);
   delay(200);
   initializeHardware();
   connectToWiFi();
+  syncRtcFromNtp();
 
-  // NTP sync at boot (UTC)
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print("Sync time...");
-    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-    struct tm tminfo;
-    time_t nowSecs = 0;
-    int tries = 0;
-    while (tries < 20)
-    {
-      if (getLocalTime(&tminfo, 500))
-      {
-        nowSecs = mktime(&tminfo);
-        break;
-      }
-      tries++;
-    }
-    if (nowSecs > 0)
-    {
-      rtc.adjust(DateTime((uint32_t)nowSecs));
-      Serial.println("RTC set from NTP.");
-    }
-    delay(400);
-  }
-
-  if (!bootEmptyCheckAndTare())
-  {
-    Serial.println("Proceeding without confirmed empty tare.");
-  }
-
+  // If online and have backlog, flush immediately
   if (WiFi.status() == WL_CONNECTED && hasOfflineData() && isApiReachableCached())
   {
     lcd.clear();
-    lcd.backlight();
     lcd.setCursor(0, 0);
     lcd.print("Sending data...");
     lcd.setCursor(0, 1);
     lcd.print("Please wait");
-    state = FLUSHING_OFFLINE;
+    state = FLUSHING;
     stateTs = millis();
-    return;
   }
-
-  showPressPlant();
-  state = WAIT_FOR_PLANT_SELECTION;
-  stateTs = millis();
+  else
+  {
+    showPromptPlant();
+    state = WAIT_FOR_PLANT;
+    stateTs = millis();
+  }
   lastWifiConnected = (WiFi.status() == WL_CONNECTED);
-  idleSinceMs = millis();
 }
 
 void loop()
 {
-  LoadCell.update();
-  float currentW = LoadCell.getData();
-  itemPresent = isItemPresent(currentW);
-  if (state == WAIT_FOR_PLANT_SELECTION && ENABLE_AUTO_ZERO)
-  {
-    maybeAutoZero(currentW);
-  }
+  // WiFi keep-alive and banner
   static unsigned long lastWiFiCheck = 0;
   if (millis() - lastWiFiCheck > 1000)
   {
@@ -197,66 +159,64 @@ void loop()
     {
       WiFi.disconnect();
       WiFi.begin(ssid, password);
-      if (lastWifiConnected && state == WAIT_FOR_PLANT_SELECTION)
-      {
+      if (lastWifiConnected && state == WAIT_FOR_PLANT)
         showWifiToast("WiFi disconnected");
-      }
     }
     else
     {
-      if (!lastWifiConnected && state == WAIT_FOR_PLANT_SELECTION)
-      {
+      if (!lastWifiConnected && state == WAIT_FOR_PLANT)
         showWifiToast("WiFi connected");
-      }
-      if (hasOfflineData() && state == WAIT_FOR_PLANT_SELECTION)
+      // Opportunistic flush when idle
+      if (hasOfflineData() && state == WAIT_FOR_PLANT)
       {
         lcd.clear();
         lcd.setCursor(0, 0);
-        lcd.print("Checking internet");
+        lcd.print("Sending data...");
         lcd.setCursor(0, 1);
-        lcd.print(" ");
-        state = FLUSHING_OFFLINE;
+        lcd.print("Please wait");
+        state = FLUSHING;
         stateTs = millis();
       }
     }
     lastWifiConnected = nowConn;
   }
-  if (millis() - lastApiCheckMs > API_CHECK_INTERVAL_MS)
+
+  if (millis() - lastApiCheckMs > 8000)
   {
     lastApiCheckMs = millis();
     apiReachableCached = isApiReachableCached();
   }
+
+  // Read keypad
   char key = keypad.getKey();
+
+  // Read raw weight for presence detection
+  LoadCell.update();
+  float w = LoadCell.getData();
+  itemPresent = isItemPresent(fabsf(w));
+
   switch (state)
   {
-  case SHOW_PRESS_PLANT:
-    state = WAIT_FOR_PLANT_SELECTION;
-    stateTs = millis();
-    break;
-  case WAIT_FOR_PLANT_SELECTION:
-    if (key == '*')
-    {
-      doUserTare();
-      idleSinceMs = millis();
-      break;
-    }
+  case WAIT_FOR_PLANT:
+  {
     if (key && key >= '0' && key <= '9')
     {
       selectedPlant = (key == '0') ? 0 : (key - '0');
-      Serial.print("Plant selected: ");
-      Serial.println(selectedPlant);
       lcd.clear();
       lcd.setCursor(0, 0);
       lcd.print("Plant ");
       lcd.print(selectedPlant);
       lcd.setCursor(0, 1);
       lcd.print("Place item");
-      state = WAIT_FOR_ITEM_PRESENT_STABLE;
       presentSince = 0;
+      state = WAIT_FOR_ITEM_STABLE;
       stateTs = millis();
     }
     break;
-  case WAIT_FOR_ITEM_PRESENT_STABLE:
+  }
+
+  case WAIT_FOR_ITEM_STABLE:
+  {
     if (itemPresent)
     {
       if (presentSince == 0)
@@ -275,44 +235,43 @@ void loop()
       presentSince = 0;
     }
     break;
+  }
+
   case MEASURE_AND_SEND:
   {
     float meanG = NAN;
     bool stable = measureStableWeight(meanG);
-    if (!stable)
-    {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Unstable weight");
-      lcd.setCursor(0, 1);
-      lcd.print("Try again");
-      delay(600);
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Plant ");
-      lcd.print(selectedPlant);
-      lcd.setCursor(0, 1);
-      lcd.print("Place item");
-      state = WAIT_FOR_ITEM_PRESENT_STABLE;
-      presentSince = 0;
-      stateTs = millis();
-      break;
-    }
     int gramsToSend = (int)lroundf(meanG);
     String ts = getISO8601();
-    bool sent = sendToSupabase(selectedPlant, gramsToSend, ts);
-    if (!sent)
+
+    bool sent = false;
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      // Try twice while online
+      for (int attempt = 0; attempt < 2 && !sent; ++attempt)
+      {
+        sent = sendToSupabase(selectedPlant, gramsToSend, ts);
+      }
+      if (!sent)
+      {
+        // As requested, if internet goes away or send fails, queue as well
+        queueOffline(selectedPlant, gramsToSend, ts);
+      }
+    }
+    else
     {
       queueOffline(selectedPlant, gramsToSend, ts);
     }
+
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print("Plant ");
     lcd.print(selectedPlant);
     lcd.setCursor(0, 1);
-    lcd.print(gramsToSend);
+    lcd.print(String(meanG, 2));
     lcd.print("g ");
     lcd.print(sent ? "sent" : "queued");
+
     Serial.print("Plant ");
     Serial.print(selectedPlant);
     Serial.print(" weight ");
@@ -320,19 +279,21 @@ void loop()
     Serial.print("g at ");
     Serial.print(ts);
     Serial.println(sent ? " [SENT]" : " [QUEUED]");
-    state = WAIT_FOR_ITEM_REMOVAL_STABLE;
+
     removedSince = 0;
+    state = WAIT_FOR_REMOVAL;
     stateTs = millis();
     break;
   }
-  case WAIT_FOR_ITEM_REMOVAL_STABLE:
+
+  case WAIT_FOR_REMOVAL:
+  {
     if (key == '#' || (key && key >= '0' && key <= '9'))
     {
-      selectedPlant = -1;
-      showPressPlant();
-      state = WAIT_FOR_PLANT_SELECTION;
+      showPromptPlant();
+      state = WAIT_FOR_PLANT;
       stateTs = millis();
-      idleSinceMs = millis();
+      selectedPlant = -1;
       break;
     }
     if (!itemPresent)
@@ -341,11 +302,10 @@ void loop()
         removedSince = millis();
       if (millis() - removedSince >= (unsigned long)REMOVED_DURATION_MS)
       {
-        selectedPlant = -1;
-        showPressPlant();
-        state = WAIT_FOR_PLANT_SELECTION;
+        showPromptPlant();
+        state = WAIT_FOR_PLANT;
         stateTs = millis();
-        idleSinceMs = millis();
+        selectedPlant = -1;
       }
     }
     else
@@ -353,19 +313,22 @@ void loop()
       removedSince = 0;
     }
     break;
-  case FLUSHING_OFFLINE:
+  }
+
+  case FLUSHING:
   {
     if (WiFi.status() != WL_CONNECTED)
     {
-      showPressPlant();
-      state = WAIT_FOR_PLANT_SELECTION;
+      showPromptPlant();
+      state = WAIT_FOR_PLANT;
       stateTs = millis();
       break;
     }
+    // Simple sending spinner
     static unsigned long lastAnim = 0;
     static const char spinnerChars[4] = {'|', '/', '-', '\\'};
     static uint8_t spIdx = 0;
-    if (millis() - lastAnim > 200)
+    if (millis() - lastAnim > 180)
     {
       lastAnim = millis();
       spIdx = (spIdx + 1) & 0x03;
@@ -380,52 +343,42 @@ void loop()
     bool done = flushOfflineQueue();
     if (done || !hasOfflineData())
     {
-      flushTotal = -1;
-      flushSent = 0;
-      showPressPlant();
-      state = WAIT_FOR_PLANT_SELECTION;
+      showPromptPlant();
+      state = WAIT_FOR_PLANT;
       stateTs = millis();
-      idleSinceMs = millis();
     }
     break;
   }
   }
+
   delay(10);
 }
 
-// The following helper functions mirror Finalv5.ino but include NTP variant specifics where noted
-
+// ----------------- Helpers -----------------
 void initializeHardware()
 {
+  // I2C devices
   Wire.begin(I2C_SDA, I2C_SCL);
   lcd.init();
   lcd.backlight();
+  // Create WiFi glyph (0) and cross (1)
   uint8_t wifiGlyph[8] = {0, 0, 0b00100, 0b01010, 0b10001, 0, 0b00100, 0};
   uint8_t xGlyph[8] = {0, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0, 0};
   lcd.createChar(0, wifiGlyph);
   lcd.createChar(1, xGlyph);
+
+  // HX711
   LoadCell.begin();
-  prefs.begin("scale", true);
-  if (prefs.isKey("cal"))
-  {
-    float stored = prefs.getFloat("cal", calFactor);
-    if (isfinite(stored) && stored > 0.0f)
-      calFactor = stored;
-  }
-  prefs.end();
-  LoadCell.start(1000, false);
+  LoadCell.start(1000);
   LoadCell.setCalFactor(calFactor);
+
+  // RTC
   if (!rtc.begin())
   {
     Serial.println("RTC not found!");
   }
-  else
-  {
-    if (rtc.lostPower())
-    {
-      Serial.println("RTC lost power; will try NTP if WiFi");
-    }
-  }
+
+  // SD
   SPI.begin(SD_SCK_PIN, SD_MISO_PIN, SD_MOSI_PIN, SD_CS_PIN);
   if (!SD.begin(SD_CS_PIN, SPI))
   {
@@ -435,7 +388,6 @@ void initializeHardware()
   {
     ensureSD();
   }
-  Serial.println("Hardware initialized");
 }
 
 void connectToWiFi()
@@ -469,35 +421,93 @@ void connectToWiFi()
   delay(800);
 }
 
-bool isItemPresent(float weight) { return fabsf(weight) >= MIN_WEIGHT_THRESHOLD; }
+void syncRtcFromNtp()
+{
+  if (WiFi.status() != WL_CONNECTED)
+    return;
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Sync time...");
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  struct tm tminfo;
+  time_t nowSecs = 0;
+  int tries = 0;
+  while (tries < 20)
+  {
+    if (getLocalTime(&tminfo, 500))
+    {
+      nowSecs = mktime(&tminfo);
+      break;
+    }
+    tries++;
+  }
+  if (nowSecs > 0)
+  {
+    rtc.adjust(DateTime((uint32_t)nowSecs));
+    Serial.println("RTC set from NTP.");
+  }
+}
+
+void showPromptPlant()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Press plant no.");
+  lcd.setCursor(0, 1);
+  lcd.print("1-9, 0 for P0");
+  updateWifiBadge();
+}
+
+void showWifiToast(const char *msg)
+{
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(msg);
+  lcd.setCursor(0, 1);
+  lcd.print(" ");
+  delay(500);
+  if (state == WAIT_FOR_PLANT)
+    showPromptPlant();
+}
+
+void updateWifiBadge()
+{
+  lcd.setCursor(15, 1);
+  if (WiFi.status() == WL_CONNECTED)
+    lcd.write((uint8_t)0);
+  else
+    lcd.write((uint8_t)1);
+}
+
+bool isItemPresent(float g) { return g >= MIN_WEIGHT_THRESHOLD; }
 
 bool measureStableWeight(float &outMeanG)
 {
+  // Collect samples
   const int N = STABILITY_SAMPLES;
   static float samples[STABILITY_SAMPLES];
   for (int i = 0; i < N; i++)
   {
     LoadCell.update();
-    samples[i] = LoadCell.getData();
+    samples[i] = fabsf(LoadCell.getData());
     delay(STABILITY_DELAY_MS);
   }
+  // Mean
   double sum = 0.0;
   for (int i = 0; i < N; i++)
     sum += samples[i];
   float mean = (float)(sum / N);
-  double sumsq = 0.0;
+  // Stddev
+  double ss = 0.0;
   for (int i = 0; i < N; i++)
   {
     double d = samples[i] - mean;
-    sumsq += d * d;
+    ss += d * d;
   }
-  float stddev = (float)sqrt(sumsq / (N - 1));
-  if (stddev > STDDEV_THRESHOLD_G)
-  {
-    Serial.print("Unstable stddev=");
-    Serial.println(stddev, 3);
+  float sd = (float)sqrt(ss / (N - 1));
+  if (sd > STDDEV_THRESHOLD_G)
     return false;
-  }
+  // Trim extremes, then mean
   static float work[STABILITY_SAMPLES];
   for (int i = 0; i < N; i++)
     work[i] = samples[i];
@@ -542,10 +552,7 @@ String getISO8601()
 bool sendToSupabase(int plantNumber, float weight, const String &iso8601)
 {
   if (WiFi.status() != WL_CONNECTED)
-  {
-    Serial.println("WiFi not connected, cannot send");
     return false;
-  }
   HTTPClient http;
   String url = String(supabaseUrl) + "/rest/v1/weights";
   http.setTimeout(4000);
@@ -560,52 +567,9 @@ bool sendToSupabase(int plantNumber, float weight, const String &iso8601)
   doc["created_at"] = iso8601;
   String body;
   serializeJson(doc, body);
-  Serial.print("POST ");
-  Serial.println(url);
-  Serial.print("Payload: ");
-  Serial.println(body);
   int code = http.POST(body);
   http.end();
-  Serial.print("HTTP code: ");
-  Serial.println(code);
   return code == 200 || code == 201;
-}
-
-void showPressPlant()
-{
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Press plant no.");
-  lcd.setCursor(0, 1);
-  lcd.print("* tare  1-9,0 ");
-  updateWifiBadge();
-}
-
-void showWifiToast(const char *msg)
-{
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(msg);
-  lcd.setCursor(0, 1);
-  lcd.print(" ");
-  delay(500);
-  if (state == WAIT_FOR_PLANT_SELECTION)
-  {
-    showPressPlant();
-  }
-}
-
-void updateWifiBadge()
-{
-  lcd.setCursor(15, 1);
-  if (WiFi.status() == WL_CONNECTED)
-  {
-    lcd.write((uint8_t)0);
-  }
-  else
-  {
-    lcd.write((uint8_t)1);
-  }
 }
 
 void ensureSD()
@@ -614,9 +578,7 @@ void ensureSD()
   {
     File f = SD.open(OFFLINE_FILE, FILE_WRITE);
     if (f)
-    {
       f.close();
-    }
   }
 }
 
@@ -626,7 +588,7 @@ void queueOffline(int plantNumber, float weight, const String &iso8601)
   File f = SD.open(OFFLINE_FILE, FILE_APPEND);
   if (!f)
   {
-    Serial.println("Failed to open offline queue for append");
+    Serial.println("Offline queue open failed");
     return;
   }
   StaticJsonDocument<128> doc;
@@ -638,7 +600,6 @@ void queueOffline(int plantNumber, float weight, const String &iso8601)
   line += '\n';
   f.print(line);
   f.close();
-  Serial.println("Queued offline: " + line);
 }
 
 bool flushOfflineQueue()
@@ -658,10 +619,11 @@ bool flushOfflineQueue()
     in.close();
     return false;
   }
+
   bool allSent = true;
   int processed = 0;
-  const int MAX_LINES_PER_CALL = 1000;
-  while (in.available() && processed < MAX_LINES_PER_CALL)
+  const int MAX_LINES = 2000;
+  while (in.available() && processed < MAX_LINES)
   {
     String line = in.readStringUntil('\n');
     line.trim();
@@ -684,7 +646,7 @@ bool flushOfflineQueue()
     }
     processed++;
   }
-  bool moreRemaining = in.available();
+  // Copy remaining if any
   while (in.available())
   {
     String rest = in.readStringUntil('\n');
@@ -696,15 +658,16 @@ bool flushOfflineQueue()
   in.close();
   out.close();
   SD.remove(OFFLINE_FILE);
-  if (!allSent || moreRemaining)
+  if (allSent)
   {
-    SD.rename(TMP_FILE, OFFLINE_FILE);
+    SD.remove(TMP_FILE);
+    return true;
   }
   else
   {
-    SD.remove(TMP_FILE);
+    SD.rename(TMP_FILE, OFFLINE_FILE);
+    return false;
   }
-  return allSent && !moreRemaining;
 }
 
 bool hasOfflineData()
@@ -714,9 +677,9 @@ bool hasOfflineData()
   File f = SD.open(OFFLINE_FILE, FILE_READ);
   if (!f)
     return false;
-  bool hasData = f.available();
+  bool has = f.available();
   f.close();
-  return hasData;
+  return has;
 }
 
 bool isApiReachableCached()
@@ -732,167 +695,4 @@ bool isApiReachableCached()
   int code = http.GET();
   http.end();
   return code == 200;
-}
-
-void doUserTare()
-{
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Taring...");
-  lcd.setCursor(0, 1);
-  lcd.print("Keep empty");
-  LoadCell.tareNoDelay();
-  unsigned long start = millis();
-  while (!LoadCell.getTareStatus() && millis() - start < 8000UL)
-  {
-    LoadCell.update();
-    delay(5);
-  }
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  if (LoadCell.getTareStatus())
-  {
-    lcd.print("Tare complete");
-  }
-  else
-  {
-    lcd.print("Tare timeout");
-  }
-  delay(600);
-  showPressPlant();
-}
-
-bool bootEmptyCheckAndTare()
-{
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print("Checking empty");
-  lcd.setCursor(0, 1);
-  lcd.print("platform...");
-  const unsigned long tEnd = millis() + BOOT_CHECK_DURATION_MS;
-  const int N = 100;
-  float buf[100];
-  int n = 0;
-  while ((millis() < tEnd) && n < N)
-  {
-    LoadCell.update();
-    buf[n++] = LoadCell.getData();
-    delay(10);
-  }
-  if (n == 0)
-    n = 1;
-  double sum = 0.0;
-  for (int i = 0; i < n; i++)
-    sum += buf[i];
-  float mean = (float)(sum / n);
-  double sumsq = 0.0;
-  for (int i = 0; i < n; i++)
-  {
-    double d = buf[i] - mean;
-    sumsq += d * d;
-  }
-  float stddev = (float)sqrt(sumsq / max(1, n - 1));
-  if (fabsf(mean) > BOOT_EMPTY_MAX_ABS_G || stddev > BOOT_EMPTY_MAX_STD_G)
-  {
-    while (true)
-    {
-      lcd.clear();
-      lcd.setCursor(0, 0);
-      lcd.print("Clear the scale");
-      lcd.setCursor(0, 1);
-      lcd.print("Press * to tare");
-      unsigned long start = millis();
-      bool done = false;
-      while (millis() - start < 20000UL)
-      {
-        LoadCell.update();
-        char k = keypad.getKey();
-        if (k == '*')
-        {
-          done = true;
-          break;
-        }
-        delay(10);
-      }
-      if (done)
-        break;
-    }
-  }
-  LoadCell.tareNoDelay();
-  unsigned long start = millis();
-  while (!LoadCell.getTareStatus() && millis() - start < 8000UL)
-  {
-    LoadCell.update();
-    delay(5);
-  }
-  lcd.clear();
-  if (LoadCell.getTareStatus())
-  {
-    lcd.setCursor(0, 0);
-    lcd.print("Ready");
-    lcd.setCursor(0, 1);
-    lcd.print("Press plant no.");
-    return true;
-  }
-  else
-  {
-    lcd.setCursor(0, 0);
-    lcd.print("Tare failed");
-    lcd.setCursor(0, 1);
-    lcd.print("Proceeding...");
-    delay(800);
-    return false;
-  }
-}
-
-void maybeAutoZero(float currentW)
-{
-  if (fabsf(currentW) < AUTO_ZERO_MAX_ABS_G)
-  {
-    if (idleSinceMs == 0)
-      idleSinceMs = millis();
-  }
-  else
-  {
-    idleSinceMs = millis();
-    return;
-  }
-  if (millis() - idleSinceMs >= AUTO_ZERO_MIN_IDLE_MS && millis() - lastAutoZeroMs >= AUTO_ZERO_COOLDOWN_MS)
-  {
-    const int N = 60;
-    float b[N];
-    for (int i = 0; i < N; i++)
-    {
-      LoadCell.update();
-      b[i] = LoadCell.getData();
-      delay(8);
-    }
-    double sum = 0.0;
-    for (int i = 0; i < N; i++)
-      sum += b[i];
-    float mean = (float)(sum / N);
-    double ss = 0.0;
-    for (int i = 0; i < N; i++)
-    {
-      double d = b[i] - mean;
-      ss += d * d;
-    }
-    float sd = (float)sqrt(ss / (N - 1));
-    if (fabsf(mean) < AUTO_ZERO_MAX_ABS_G && sd < AUTO_ZERO_MAX_STD_G)
-    {
-      Serial.println("Auto-zero engaged");
-      LoadCell.tareNoDelay();
-      unsigned long start = millis();
-      while (!LoadCell.getTareStatus() && millis() - start < 2000UL)
-      {
-        LoadCell.update();
-        delay(5);
-      }
-      lastAutoZeroMs = millis();
-    }
-    else
-    {
-      idleSinceMs = millis();
-    }
-  }
 }
