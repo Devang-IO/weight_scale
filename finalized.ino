@@ -1,6 +1,4 @@
-//ESP32 Digital Weight Scale - Background Data Processing Version
-//This version stores data locally first, then sends in background
-
+//ESP32 Digital Weight Scale / Background Data Processing Version
 #include <HX711_ADC.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
@@ -23,7 +21,7 @@
 #define PLANT_KEY_PREFIX "plant_"
 #define CAL_FACTOR 360.0f
 
-// Pin definitions
+// Pins
 #define PIN_HX711_DOUT  23
 #define PIN_HX711_SCK   22
 #define PIN_I2C_SDA     18
@@ -33,7 +31,7 @@
 #define BUTTON_WEB_PIN 32
 #define BUZZER_PIN 2
 
-// Keypad pins - Updated pin configuration
+// Keypad pins
 static const byte KEYPAD_ROWS = 4;
 static const byte KEYPAD_COLS = 3;
 static const char KEYPAD_KEYS[4][3] = {
@@ -90,7 +88,7 @@ String wifiPassword = WIFI_PASSWORD;
 float calibrationFactor = CAL_FACTOR;
 unsigned long idleTimeout = 120000;
 
-// Simple weight reading for better accuracy (from esp32-simple-scale.ino)
+// Simple weight reading for better accuracy
 float currentWeight = 0;
 float lastDisplayWeight = 0;
 float currentTemperature = 0; // ESP32 internal temperature in Celsius
