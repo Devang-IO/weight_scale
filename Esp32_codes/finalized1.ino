@@ -99,8 +99,6 @@ const float STABLE_THRESHOLD = 0.5; // Only update if change is significant
 int stableCount = 0;
 const int REQUIRED_STABLE_READINGS = 8; // More stable readings required
 
-
-
 // Background processing
 unsigned long lastBackgroundProcess = 0;
 const unsigned long BACKGROUND_INTERVAL = 2000; // Process queue every 2 seconds
@@ -477,31 +475,10 @@ void runSimpleMode() {
   LoadCell.update();
 
   if (millis() - lastWeightTime >= WEIGHT_READ_INTERVAL) {
-    // Use the same weight reading logic as advanced mode
-    float rawWeight = LoadCell.getData();
-    if (rawWeight < 0) {
-      rawWeight = rawWeight * (-1);
+    currentWeight = LoadCell.getData();
+    if (currentWeight < 0) {
+      currentWeight = -currentWeight;
     }
-    currentWeight = rawWeight;
-    
-    // Check for stability using same logic as advanced mode
-    if (currentWeight >= MIN_WEIGHT_THRESHOLD) {
-      if (abs(currentWeight - lastDisplayWeight) < STABLE_THRESHOLD) {
-        stableCount++;
-        if (stableCount >= REQUIRED_STABLE_READINGS) {
-          stableWeight = currentWeight;
-        }
-      } else {
-        stableCount = 0;
-        lastDisplayWeight = currentWeight;
-      }
-    } else {
-      // Item removed - reset
-      stableCount = 0;
-      stableWeight = 0;
-      lastDisplayWeight = 0;
-    }
-    
     lastWeightTime = millis();
   }
 
@@ -538,16 +515,7 @@ void updateDisplaySimple() {
   lcd.setCursor(0, 0);
   lcd.print("Simple Scale");
   lcd.setCursor(0, 1);
-  
-  // Use same stableWeight variable as advanced mode
-  if (stableWeight > 0) {
-    // Round to 1 decimal place for cleaner display (no fluctuation)
-    lcd.print(String(stableWeight, 1) + " g");
-  } else if (currentWeight >= MIN_WEIGHT_THRESHOLD) {
-    lcd.print("Weighing...");
-  } else {
-    lcd.print("Place item");
-  }
+  lcd.print(String(currentWeight, 2) + " g");
   
   // Show WiFi status indicator in bottom right corner
   lcd.setCursor(15, 1);
